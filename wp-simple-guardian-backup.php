@@ -4,8 +4,8 @@
  * Plugin URI: https://example.com/
  * Description: Creates a full backup of the WordPress directory and the database defined in wp-config.php.
  * Version: 1.3
- * Author: Your Name
- * Author URI: https://example.com/
+ * Author: Kenan SALTIK
+ * Author URI: https://oneyhosting.com
  * License: GPL2
  */
 
@@ -730,4 +730,5 @@ function wsgb_handle_delete_action() {
         wp_redirect( remove_query_arg( array( 'wsgb_delete', 'wsgb_delete_nonce' ), admin_url( 'tools.php?page=wsgb_backup_page' ) ) );
         exit;
     }
+
 }
