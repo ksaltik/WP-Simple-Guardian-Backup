@@ -113,8 +113,14 @@ function wsgb_create_full_backup() {
         return new WP_Error( 'dir_creation_failed', 'Could not create backup directory: ' . WP_SIMPLE_BACKUP_DIR );
     }
 
+    // Get sanitized site name for the file
+    $site_name = sanitize_title( get_bloginfo( 'name' ) );
+    if ( empty( $site_name ) ) {
+        $site_name = 'site';
+    }
+
     $timestamp = gmdate( 'Ymd-His' ); // Use gmdate() for consistency
-    $temp_name = "full-backup-{$timestamp}";
+    $temp_name = "{$site_name}-full-backup-{$timestamp}";
     $db_sql_file = WP_SIMPLE_BACKUP_DIR . "{$temp_name}.sql";
     $zip_file_path = WP_SIMPLE_BACKUP_DIR . "{$temp_name}.zip";
 
