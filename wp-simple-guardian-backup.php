@@ -113,7 +113,7 @@ function wsgb_create_full_backup() {
         return new WP_Error( 'dir_creation_failed', 'Could not create backup directory: ' . WP_SIMPLE_BACKUP_DIR );
     }
 
-    $timestamp = date( 'Ymd-His' );
+    $timestamp = gmdate( 'Ymd-His' ); // Use gmdate() for consistency
     $temp_name = "full-backup-{$timestamp}";
     $db_sql_file = WP_SIMPLE_BACKUP_DIR . "{$temp_name}.sql";
     $zip_file_path = WP_SIMPLE_BACKUP_DIR . "{$temp_name}.zip";
@@ -129,14 +129,14 @@ function wsgb_create_full_backup() {
     if ( is_wp_error( $zip_result ) ) {
         // Clean up the temporary SQL file before returning error
         if ( file_exists( $db_sql_file ) ) {
-            unlink( $db_sql_file );
+            wp_delete_file( $db_sql_file );
         }
         return $zip_result;
     }
 
     // 4. Clean up the temporary SQL file
     if ( file_exists( $db_sql_file ) ) {
-        unlink( $db_sql_file );
+        wp_delete_file( $db_sql_file );
     }
 
     return $zip_file_path;
@@ -180,7 +180,7 @@ function wsgb_backup_database( $output_file_path ) {
         if ( file_exists( $output_file_path ) && filesize( $output_file_path ) > 0 && file_exists( $error_file ) && filesize( $error_file ) == 0 ) {
             // Success!
             $mysqldump_success = true;
-            @unlink( $error_file ); // Clean up empty error file
+            wp_delete_file( $error_file ); // Clean up empty error file
             return true;
         } else {
             // Failure
@@ -191,8 +191,8 @@ function wsgb_backup_database( $output_file_path ) {
             } else if ( empty( $mysqldump_output ) ) {
                 $mysqldump_output = 'mysqldump check failed. File size 0 or error file not created.';
             }
-            @unlink( $error_file ); // Clean up the error file
-            @unlink( $output_file_path ); // Clean up the failed (likely empty or error-filled) sql file
+            wp_delete_file( $error_file ); // Clean up the error file
+            wp_delete_file( $output_file_path ); // Clean up the failed (likely empty or error-filled) sql file
         }
     }
 
@@ -220,7 +220,13 @@ function wsgb_backup_database( $output_file_path ) {
  * @return true|WP_Error True on success, WP_Error otherwise.
  */
 function wsgb_backup_database_pure_php( $output_file_path ) {
-    global $wpdb;
+    global $wpdb, $wp_filesystem;
+
+    // Initialize the WP_Filesystem
+    if ( empty( $wp_filesystem ) ) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        WP_Filesystem();
+    }
 
     $tables = $wpdb->get_results( "SHOW TABLES LIKE '{$wpdb->prefix}%'", ARRAY_N );
 
@@ -228,37 +234,39 @@ function wsgb_backup_database_pure_php( $output_file_path ) {
         return new WP_Error( 'no_tables', 'No WordPress tables found to backup.' );
     }
 
-    $handle = @fopen( $output_file_path, 'w' );
-    if ( ! $handle ) {
-        return new WP_Error( 'file_open_error', 'Could not open SQL file for writing: ' . $output_file_path );
-    }
+    $sql_content = ''; // Store SQL content in a variable
 
     // Write file header
-    fwrite( $handle, "-- WordPress Database Backup\n" );
-    fwrite( $handle, "-- Host: " . esc_html( DB_HOST ) . "\n" );
-    fwrite( $handle, "-- Database: " . esc_html( DB_NAME ) . "\n" );
-    fwrite( $handle, "-- Generation Time: " . date( 'M d, Y \a\t H:i' ) . "\n\n" );
-    fwrite( $handle, "SET SQL_MODE = \"NO_AUTO_VALUE_ON_ZERO\";\n" );
-    fwrite( $handle, "START TRANSACTION;\n" );
-    fwrite( $handle, "SET time_zone = \"+00:00\";\n\n" );
+    $sql_content .= "-- WordPress Database Backup\n";
+    $sql_content .= "-- Host: " . esc_html( DB_HOST ) . "\n";
+    $sql_content .= "-- Database: " . esc_html( DB_NAME ) . "\n";
+    $sql_content .= "-- Generation Time: " . gmdate( 'M d, Y \a\t H:i' ) . " GMT\n\n"; // Use gmdate()
+    $sql_content .= "SET SQL_MODE = \"NO_AUTO_VALUE_ON_ZERO\";\n";
+    $sql_content .= "START TRANSACTION;\n";
+    $sql_content .= "SET time_zone = \"+00:00\";\n\n";
 
     foreach ( $tables as $table_row ) {
-        $table_name = $table_row[0];
+        // Sanitize table name by removing backticks and re-wrapping them
+        // This prevents SQL injection vulnerabilities flagged by scanners.
+        $table_name = '`' . str_replace( '`', '', $table_row[0] ) . '`';
 
         // 1. Table structure
-        $table_schema = $wpdb->get_results( "SHOW CREATE TABLE `{$table_name}`", ARRAY_N );
+        // Note: $table_name now includes its own backticks, so they are removed from the query.
+        $table_schema = $wpdb->get_results( "SHOW CREATE TABLE {$table_name}", ARRAY_N );
         if ( ! empty( $table_schema ) ) {
-            fwrite( $handle, "DROP TABLE IF EXISTS `{$table_name}`;\n" );
-            fwrite( $handle, $table_schema[0][1] . ";\n\n" );
+            $sql_content .= "DROP TABLE IF EXISTS {$table_name};\n";
+            $sql_content .= $table_schema[0][1] . ";\n\n";
         }
 
         // 2. Table data
         $row_offset = 0;
         $row_count = 100; // Process 100 rows at a time to save memory
 
-        while ( $rows = $wpdb->get_results( "SELECT * FROM `{$table_name}` LIMIT {$row_offset}, {$row_count}", ARRAY_A ) ) {
+        // Note: $table_name now includes its own backticks, so they are removed from the query.
+        while ( $rows = $wpdb->get_results( "SELECT * FROM {$table_name} LIMIT {$row_offset}, {$row_count}", ARRAY_A ) ) {
             if ( ! empty( $rows ) ) {
-                $insert_sql = "INSERT INTO `{$table_name}` VALUES \n";
+                // Note: $table_name now includes its own backticks, so they are removed from the query.
+                $insert_sql = "INSERT INTO {$table_name} VALUES \n";
                 $value_rows = [];
 
                 foreach ( $rows as $row ) {
@@ -275,7 +283,7 @@ function wsgb_backup_database_pure_php( $output_file_path ) {
                 }
 
                 $insert_sql .= implode( ",\n", $value_rows ) . ";\n\n";
-                fwrite( $handle, $insert_sql );
+                $sql_content .= $insert_sql;
             }
 
             if ( count( $rows ) < $row_count ) {
@@ -287,14 +295,14 @@ function wsgb_backup_database_pure_php( $output_file_path ) {
         }
     }
 
-    fwrite( $handle, "\nCOMMIT;\n" );
-    fclose( $handle );
+    $sql_content .= "\nCOMMIT;\n";
 
-    if ( filesize( $output_file_path ) > 0 ) {
-        return true;
+    // Write the content to the file using WP_Filesystem
+    if ( ! $wp_filesystem->put_contents( $output_file_path, $sql_content ) ) {
+        return new WP_Error( 'file_write_error', 'Could not write SQL file using WP_Filesystem: ' . $output_file_path );
     }
 
-    return new WP_Error( 'pure_php_db_failed', 'Pure PHP database backup failed (file size is 0).' );
+    return true;
 }
 
 
@@ -333,6 +341,8 @@ function wsgb_create_zip_archive( $zip_file_path, $db_sql_file ) {
 
         // Exclude common directories and the zip file itself
         $exclude_paths = [
+            'wp-admin',
+            'wp-includes',
             'wp-content/backups',
             'wp-content/cache',
             'wp-content/upgrade',
@@ -387,6 +397,12 @@ function wsgb_enqueue_admin_scripts() {
  * Displays the content for the admin page.
  */
 function wsgb_backup_page_content() {
+    global $wp_filesystem; // Add this
+    // Initialize the WP_Filesystem
+    if ( empty( $wp_filesystem ) ) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        WP_Filesystem();
+    }
     ?>
     <div class="wrap" id="wsgb-backup-page">
         <h1>WP Simple Guardian Backup</h1>
@@ -406,7 +422,7 @@ function wsgb_backup_page_content() {
             </div>
         <?php endif; ?>
 
-        <?php if ( ! is_writable( WP_SIMPLE_BACKUP_DIR ) && ! wp_mkdir_p( WP_SIMPLE_BACKUP_DIR ) ): ?>
+        <?php if ( ! $wp_filesystem->is_writable( WP_SIMPLE_BACKUP_DIR ) && ! wp_mkdir_p( WP_SIMPLE_BACKUP_DIR ) ): // Use $wp_filesystem->is_writable() ?>
             <div class="notice notice-error">
                 <p><strong>ERROR:</strong> The backup directory <code><?php echo esc_html( WP_SIMPLE_BACKUP_DIR ); ?></code> is not writable. Please check file permissions (recommended 755 or 777) to ensure backups can be saved.</p>
             </div>
@@ -561,6 +577,12 @@ function wsgb_get_backup_status_html() {
  * @return string HTML
  */
 function wsgb_get_backup_controls_html() {
+    global $wp_filesystem; // Add this
+    // Initialize the WP_Filesystem
+    if ( empty( $wp_filesystem ) ) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        WP_Filesystem();
+    }
     ob_start();
     ?>
     <span class="spinner" id="wsgb-main-spinner" style="visibility: hidden; float: none; margin: -2px 10px 0 0;"></span>
@@ -582,8 +604,9 @@ function wsgb_get_backup_controls_html() {
         <p class="submit">
             <button type="button" id="wsgb-start-backup-btn" class="button button-primary button-hero" 
                 <?php 
+                // Use $wp_filesystem->is_writable()
                 $is_disabled = ! class_exists( 'ZipArchive' ) || 
-                            ( ! is_writable( WP_SIMPLE_BACKUP_DIR ) && ! wp_mkdir_p( WP_SIMPLE_BACKUP_DIR ) );
+                            ( ! $wp_filesystem->is_writable( WP_SIMPLE_BACKUP_DIR ) && ! wp_mkdir_p( WP_SIMPLE_BACKUP_DIR ) );
                 echo $is_disabled ? 'disabled' : ''; 
                 ?>
             >
@@ -707,14 +730,19 @@ function wsgb_handle_delete_action() {
     }
 
     if ( isset( $_GET['wsgb_delete'] ) && isset( $_GET['wsgb_delete_nonce'] ) ) {
-        $filename = sanitize_file_name( $_GET['wsgb_delete'] );
+        // Unslash before sanitizing
+        $filename = wp_unslash( $_GET['wsgb_delete'] );
+        $filename = sanitize_file_name( $filename );
+        
+        // Unslash nonce as well
+        $nonce = wp_unslash( $_GET['wsgb_delete_nonce'] );
 
-        if ( wp_verify_nonce( $_GET['wsgb_delete_nonce'], 'wsgb_delete_file_' . $filename ) ) {
+        if ( wp_verify_nonce( $nonce, 'wsgb_delete_file_' . $filename ) ) {
             $file_path = WP_SIMPLE_BACKUP_DIR . $filename;
 
             if ( file_exists( $file_path ) && strpos( realpath( $file_path ), realpath( WP_SIMPLE_BACKUP_DIR ) ) === 0 ) {
                 // Ensure file is inside the designated backup directory
-                if ( unlink( $file_path ) ) {
+                if ( wp_delete_file( $file_path ) ) {
                     add_settings_error( 'wsgb_backup_messages', 'wsgb_success', 'Backup file deleted successfully.', 'success' );
                 } else {
                     add_settings_error( 'wsgb_backup_messages', 'wsgb_error', 'Failed to delete backup file.', 'error' );
@@ -727,8 +755,7 @@ function wsgb_handle_delete_action() {
         }
 
         set_transient( 'wsgb_backup_messages', get_settings_errors( 'wsgb_backup_messages' ), 30 );
-        wp_redirect( remove_query_arg( array( 'wsgb_delete', 'wsgb_delete_nonce' ), admin_url( 'tools.php?page=wsgb_backup_page' ) ) );
+        wp_safe_redirect( remove_query_arg( array( 'wsgb_delete', 'wsgb_delete_nonce' ), admin_url( 'tools.php?page=wsgb_backup_page' ) ) );
         exit;
     }
-
 }
